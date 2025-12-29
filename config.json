@@ -1,0 +1,16 @@
+{
+  "zulip": {
+    "site": "https://zulip.example.com",
+    "bot_email": "bot@example.com",
+    "bot_key": "secret",
+    "channel": "alerts"
+  },
+  "rules": {
+    "Cryptnono killed": {
+      "pod_labels": {
+        "app.kubernetes.io/name": "cryptnono"
+      },
+      "regex": "\"action\":\\s*\"killed\""
+    }
+  }
+}
