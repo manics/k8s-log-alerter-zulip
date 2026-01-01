@@ -333,7 +333,8 @@ func getZulipDetails(cfg *ZulipConfig) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		return fmt.Errorf("Error checking Zulip auth: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("Error checking Zulip auth (%s): %s", resp.Status, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
