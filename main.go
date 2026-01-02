@@ -337,7 +337,7 @@ func formatZulipContent(
 		message = message[:maxLogLength-2] + " …"
 	} else {
 		// Try pretty printing as JSON, but not if it ends up being too long
-		var obj interface{}
+		var obj any
 		if err := json.Unmarshal([]byte(message), &obj); err == nil {
 			if indented, err := json.MarshalIndent(obj, "", "  "); err == nil {
 				json_message := "```json\n" + string(indented) + "\n```"
@@ -384,7 +384,7 @@ func getZulipDetails(cfg *ZulipConfig) error {
 		return fmt.Errorf("error reading Zulip auth response: %v", err)
 	}
 
-	var response map[string]interface{}
+	var response map[string]any
 	if err := json.Unmarshal(body, &response); err != nil {
 		return fmt.Errorf("error parsing Zulip auth response: %v", err)
 	}

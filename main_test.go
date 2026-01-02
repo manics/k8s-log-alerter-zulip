@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	"log"
 	"os"
 	"regexp"
@@ -141,8 +140,7 @@ func TestRunWatcher(t *testing.T) {
 		MaxMessageLength: 10000,
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	// Run watcher in a goroutine
 	go runWatcher(ctx, client, rule, zulipCfg, "", &HealthChecker{})
