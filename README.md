@@ -8,7 +8,8 @@ Watches Kubernetes pod logs, sends matching entries to a Zulip server.
 
 See the example [`config.json`](config.json).
 
-[Create a Zulip bot](https://zulip.com/api/api-keys), and edit `site`, `bot_email`, `bot_key` and `channel`.
+[Create a `Generic` Zulip bot](https://zulip.com/help/add-a-bot-or-integration) and obtain it's [email and API key](https://zulip.com/help/manage-a-bot).
+Edit `site`, `bot_email`, `bot_key` and `channel` in the configuration file.
 
 The `rules` section is a dictionary where the keys are the rule names which are used as Zulip topics, and values are:
 

@@ -59,11 +59,11 @@ var httpClient = &http.Client{
 
 // loadConfig loads a configuration file
 func loadConfig(path string) (*Config, error) {
-	f, err := os.Open(path)
+	f, err := os.Open(path) // #nosec G304
 	if err != nil {
 		return nil, err
 	}
-	defer f.Close()
+	defer f.Close() //nolint:errcheck
 
 	var cfg Config
 	decoder := json.NewDecoder(f)
@@ -75,7 +75,7 @@ func loadConfig(path string) (*Config, error) {
 		rule.Name = name
 		re, err := regexp.Compile(rule.Regex)
 		if err != nil {
-			return nil, fmt.Errorf("Invalid regex for rule %s: %w", name, err)
+			return nil, fmt.Errorf("invalid regex for rule %s: %w", name, err)
 		}
 		rule.Compiled = re
 		cfg.Rules[name] = rule
@@ -87,7 +87,10 @@ func loadConfig(path string) (*Config, error) {
 // k8sClient creates a client from an external or internal cluster configuration
 func k8sClient() (*kubernetes.Clientset, string, error) {
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, &clientcmd.ConfigOverrides{})
+	kubeConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		loadingRules,
+		&clientcmd.ConfigOverrides{},
+	)
 
 	config, err := kubeConfig.ClientConfig()
 	var namespace string
@@ -140,16 +143,27 @@ func (h *HealthChecker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if len(h.errors) > 0 {
 		w.WriteHeader(http.StatusInternalServerError)
 		for r, e := range h.errors {
-			fmt.Fprintf(w, "Error in rule '%s': %v\n", r, e)
+			if _, err := fmt.Fprintf(w, "Error in rule '%s': %v\n", r, e); err != nil {
+				log.Printf("Failed to write response: %v", err)
+			}
 		}
 		return
 	}
 	w.WriteHeader(http.StatusOK)
-	w.Write([]byte("ok"))
+	if _, err := w.Write([]byte("ok")); err != nil {
+		log.Printf("Failed to write response: %v", err)
+	}
 }
 
 // runWatcher creates a watcher for a log rule
-func runWatcher(ctx context.Context, client kubernetes.Interface, rule *Rule, zulipCfg *ZulipConfig, namespace string, health *HealthChecker) {
+func runWatcher(
+	ctx context.Context,
+	client kubernetes.Interface,
+	rule *Rule,
+	zulipCfg *ZulipConfig,
+	namespace string,
+	health *HealthChecker,
+) {
 	labelSelector := labels.Set(rule.PodLabels).String()
 	log.Printf("Starting watcher for rule '%s' labels: %s", rule.Name, labelSelector)
 
@@ -194,11 +208,19 @@ func runWatcher(ctx context.Context, client kubernetes.Interface, rule *Rule, zu
 							log.Printf("Watching logs for pod %s[%s]", pod.Name, container.Name)
 							streamCtx, cancel := context.WithCancel(ctx)
 							activeStreams[key] = cancel
-							go streamLogs(streamCtx, client, pod, &container, rule, zulipCfg, func() {
-								mu.Lock()
-								delete(activeStreams, key)
-								mu.Unlock()
-							})
+							go streamLogs(
+								streamCtx,
+								client,
+								pod,
+								&container,
+								rule,
+								zulipCfg,
+								func() {
+									mu.Lock()
+									delete(activeStreams, key)
+									mu.Unlock()
+								},
+							)
 						}
 					}
 					mu.Unlock()
@@ -221,7 +243,15 @@ func runWatcher(ctx context.Context, client kubernetes.Interface, rule *Rule, zu
 }
 
 // streamLogs monitors the logs for a single rule/pod/container, and sends Zulip alerts on matches
-func streamLogs(ctx context.Context, client kubernetes.Interface, pod *corev1.Pod, container *corev1.Container, rule *Rule, zulipCfg *ZulipConfig, cleanup func()) {
+func streamLogs(
+	ctx context.Context,
+	client kubernetes.Interface,
+	pod *corev1.Pod,
+	container *corev1.Container,
+	rule *Rule,
+	zulipCfg *ZulipConfig,
+	cleanup func(),
+) {
 	defer cleanup()
 	defer log.Printf("Stopped watching logs for pod %s[%s]", pod.Name, container.Name)
 
@@ -263,13 +293,20 @@ func streamLogs(ctx context.Context, client kubernetes.Interface, pod *corev1.Po
 				sendZulipAlert(zulipCfg, rule, pod, container, line)
 			}
 		}
-		stream.Close()
+		if err := stream.Close(); err != nil {
+			log.Printf("Error closing stream for pod %s[%s]: %v", pod.Name, container.Name, err)
+		}
 
 		if err := scanner.Err(); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
-			log.Printf("Log stream ended with error for pod %s[%s] (retrying): %v", pod.Name, container.Name, err)
+			log.Printf(
+				"Log stream ended with error for pod %s[%s] (retrying): %v",
+				pod.Name,
+				container.Name,
+				err,
+			)
 			select {
 			case <-ctx.Done():
 				return
@@ -286,7 +323,12 @@ func streamLogs(ctx context.Context, client kubernetes.Interface, pod *corev1.Po
 //
 // Message longer than maxLength are truncated and … is appended. If a message
 // appears to be JSON it is pretty-printed
-func formatZulipContent(pod *corev1.Pod, container *corev1.Container, message string, maxLength int) string {
+func formatZulipContent(
+	pod *corev1.Pod,
+	container *corev1.Container,
+	message string,
+	maxLength int,
+) string {
 	prefix := fmt.Sprintf("**Pod**: %s[%s]@%s\n", pod.Name, container.Name, pod.Spec.NodeName)
 
 	maxLogLength := maxLength - len(prefix)
@@ -320,7 +362,7 @@ func getZulipDetails(cfg *ZulipConfig) error {
 
 	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		return fmt.Errorf("Error creating request: %v", err)
+		return fmt.Errorf("error creating request: %v", err)
 	}
 
 	req.SetBasicAuth(cfg.BotEmail, cfg.BotKey)
@@ -328,27 +370,27 @@ func getZulipDetails(cfg *ZulipConfig) error {
 
 	resp, err := httpClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("Error checking Zulip auth: %v", err)
+		return fmt.Errorf("error checking Zulip auth: %v", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("Error checking Zulip auth (%s): %s", resp.Status, string(body))
+		return fmt.Errorf("error checking Zulip auth (%s): %s", resp.Status, string(body))
 	}
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return fmt.Errorf("Error reading Zulip auth response: %v", err)
+		return fmt.Errorf("error reading Zulip auth response: %v", err)
 	}
 
 	var response map[string]interface{}
 	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("Error parsing Zulip auth response: %v", err)
+		return fmt.Errorf("error parsing Zulip auth response: %v", err)
 	}
 
 	if result, ok := response["result"]; !ok || result != "success" {
-		return fmt.Errorf("Failed to authenticate with Zulip: %v", response)
+		return fmt.Errorf("failed to authenticate with Zulip: %v", response)
 	}
 
 	log.Printf("Successfully authenticated with Zulip")
@@ -356,11 +398,11 @@ func getZulipDetails(cfg *ZulipConfig) error {
 	if maxLen, ok := response["max_message_length"].(float64); ok {
 		cfg.MaxMessageLength = int(maxLen)
 	} else {
-		return fmt.Errorf("Failed to get max_message_length from Zulip")
+		return fmt.Errorf("failed to get max_message_length from Zulip")
 	}
 
 	if cfg.MaxMessageLength < 256 {
-		return fmt.Errorf("Server max_message_length is too small: %d", cfg.MaxMessageLength)
+		return fmt.Errorf("server max_message_length is too small: %d", cfg.MaxMessageLength)
 	}
 
 	log.Printf("Maximum message length: %d", cfg.MaxMessageLength)
@@ -368,7 +410,13 @@ func getZulipDetails(cfg *ZulipConfig) error {
 }
 
 // sendZulipAlert sends a message to a Zulip channel with topic set to the rule name
-func sendZulipAlert(cfg *ZulipConfig, rule *Rule, pod *corev1.Pod, container *corev1.Container, message string) {
+func sendZulipAlert(
+	cfg *ZulipConfig,
+	rule *Rule,
+	pod *corev1.Pod,
+	container *corev1.Container,
+	message string,
+) {
 	log.Printf("[%s] pod %s[%s] Message: %s", rule.Name, pod.Name, container.Name, message)
 	content := formatZulipContent(pod, container, message, cfg.MaxMessageLength)
 
@@ -394,7 +442,7 @@ func sendZulipAlert(cfg *ZulipConfig, rule *Rule, pod *corev1.Pod, container *co
 		log.Printf("Error sending alert to Zulip: %v", err)
 		return
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(resp.Body)
@@ -406,7 +454,12 @@ type logWriter struct{}
 
 // Write is a custom logger that outputs the timestamp as ISO8601 UTC
 func (writer logWriter) Write(bytes []byte) (int, error) {
-	return fmt.Fprintf(os.Stderr, "%s %s", time.Now().UTC().Format("2006-01-02T15:04:05Z"), string(bytes))
+	return fmt.Fprintf(
+		os.Stderr,
+		"%s %s",
+		time.Now().UTC().Format("2006-01-02T15:04:05Z"),
+		string(bytes),
+	)
 }
 
 func main() {
@@ -462,11 +515,16 @@ func main() {
 	health := &HealthChecker{}
 
 	// We've validated that we can connect to the K8s API so now we'll report on whether
-	// any of the rule watchers haved failed
+	// any of the rule watchers have failed
 	go func() {
+		srv := &http.Server{
+			Addr:         listenAddr,
+			ReadTimeout:  5 * time.Second,
+			WriteTimeout: 10 * time.Second,
+		}
 		http.HandleFunc("/healthz", health.ServeHTTP)
 		log.Printf("Starting healthcheck server on %s", listenAddr)
-		if err := http.ListenAndServe(listenAddr, nil); err != nil {
+		if err := srv.ListenAndServe(); err != nil {
 			log.Fatalf("Healthcheck server failed: %v", err)
 		}
 	}()

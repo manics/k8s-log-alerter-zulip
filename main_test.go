@@ -205,7 +205,10 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	if !success {
-		t.Errorf("Did not find expected log message '%s' after pod deletion:\n%s", expected, buf.String())
+		t.Errorf(
+			"Did not find expected log message '%s' after pod deletion:\n%s",
+			expected,
+			buf.String(),
+		)
 	}
-
 }
