@@ -20,4 +20,6 @@ WORKDIR /app
 
 COPY --from=builder /app/k8s-log-alerter-zulip .
 
+RUN adduser -S -u1000 -H logalerter
+USER logalerter
 ENTRYPOINT ["/app/k8s-log-alerter-zulip"]
