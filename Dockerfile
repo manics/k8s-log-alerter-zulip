@@ -4,10 +4,10 @@ FROM --platform=$BUILDPLATFORM $BASE_IMAGE AS builder
 WORKDIR /app
 
 # Dependencies
-COPY go.* /app/
+COPY src/go.* /app/
 RUN go mod download
 
-COPY *.go /app/
+COPY src/*.go /app/
 # Remove compiled in paths, reduce binary size by omitting
 # DWARF symbol table, symbol table and debug information
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=$TARGETARCH go build -trimpath -o k8s-log-alerter-zulip -ldflags="-w -s"
