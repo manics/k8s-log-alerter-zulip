@@ -49,3 +49,12 @@ podman run --name log-watcher \
   -v ./config.json:/config.json:ro,z \
   k8s-log-alerter-zulip -c /config.json
 ```
+
+## Kubernetes
+Create a configuration file with your Zulip connection details and at least one rule, see [`values.yaml`](helm-chart/values.yaml).
+
+```sh
+helm upgrade --install k8s-log-alerter-zulip \
+  --repo=https://www.manicstreetpreacher.co.uk/k8s-log-alerter-zulip/ \
+  k8s-log-alerter-zulip --values config.yaml
+```

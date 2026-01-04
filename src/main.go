@@ -81,6 +81,10 @@ func loadConfig(path string) (*Config, error) {
 		cfg.Rules[name] = rule
 	}
 
+	if len(cfg.Rules) == 0 {
+		return nil, fmt.Errorf("no rules defined")
+	}
+
 	return &cfg, nil
 }
 

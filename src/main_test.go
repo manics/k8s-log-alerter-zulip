@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"log"
 	"os"
 	"regexp"
@@ -57,6 +58,46 @@ func TestConfigLoad(t *testing.T) {
 	}
 	if r1.Compiled == nil {
 		t.Error("Failed to compile regex")
+	}
+}
+
+func TestConfigLoadNoRules(t *testing.T) {
+	data, err := os.ReadFile("../config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	cfg["rules"] = map[string]any{}
+
+	content, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tmpfile, err := os.CreateTemp("", "config-*.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(tmpfile.Name()) //nolint:errcheck
+
+	if _, err := tmpfile.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tmpfile.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = loadConfig(tmpfile.Name())
+	if err == nil {
+		t.Fatal("Expected error, got nil")
+	}
+	const expected = "no rules defined"
+	if err.Error() != expected {
+		t.Errorf("Expected error '%s', got '%v'", expected, err)
 	}
 }
 
