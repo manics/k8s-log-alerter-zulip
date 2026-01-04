@@ -3,6 +3,9 @@ on:
   push:
   pull_request:
 
+permissions:
+  contents: read
+
 env:
   REGISTRY: ghcr.io
   # OWNER: ${{ github.repository_owner }}
@@ -23,6 +26,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Run golangci-lint
         uses: golangci/golangci-lint-action@v9.2.0
@@ -48,6 +53,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Set up Go
         uses: actions/setup-go@v6
@@ -73,6 +80,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Docker meta
         id: meta
@@ -125,10 +134,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          persist-credentials: false
 
       - name: Update Chart.yaml version with tag
         run: |
-          export VERSION=${{ github.ref_name }}
+          export VERSION=${GITHUB_REF_NAME}
           yq --inplace '.version = env(VERSION), .appVersion = env(VERSION)' helm-chart/Chart.yaml
           git diff
 

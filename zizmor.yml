@@ -1,0 +1,11 @@
+# https://docs.zizmor.sh/configuration/
+rules:
+  unpinned-uses:
+    config:
+      policies:
+        actions/*: ref-pin
+        docker/*: ref-pin
+        manics/*: ref-pin
+        golangci/golangci-lint-action: ref-pin
+        zizmorcore/zizmor-action: ref-pin
+
