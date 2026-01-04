@@ -1,0 +1,7 @@
+apiVersion: v2
+name: k8s-log-alerter-zulip
+description: Watches Kubernetes pod logs, sends matching entries to a Zulip server
+type: application
+# Automatically updated by release workflow
+version: 0.0.0
+appVersion: latest

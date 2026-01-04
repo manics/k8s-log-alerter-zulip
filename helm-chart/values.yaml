@@ -1,0 +1,69 @@
+# Default values for k8s-log-alerter-zulip
+
+image:
+  repository: ghcr.io/manics/k8s-log-alerter-zulip
+  pullPolicy: IfNotPresent
+  # Default: Chart.AppVersion
+  tag: ""
+
+imagePullSecrets: []
+
+# Override the chart name
+nameOverride: ""
+fullnameOverride: ""
+
+zulip:
+  site: https://zulip.example.com
+  bot_email: bot@zulip.example.com
+  bot_key: secret-api-key
+  channel: alerts
+
+rules:
+  # "Rule Name 1":
+  #   pod_labels:
+  #     app.kubernetes.io/name: pod-name
+  #   regex: regular-expression
+  "Cryptnono killed":
+    pod_labels:
+      app.kubernetes.io/name: cryptnono
+    regex: "\"action\":\\s*\"killed\""
+
+# The service account and role
+serviceAccount:
+  create: true
+  # Automatically mount ServiceAccount's API credentials
+  automount: true
+  annotations: {}
+  # Default: fullname template.
+  name: ""
+
+podAnnotations: {}
+
+podLabels: {}
+
+podSecurityContext: {}
+
+securityContext: {}
+
+healthcheck:
+  port: 8081
+
+resources: {}
+  # limits:
+  #   cpu: 100m
+  #   memory: 128Mi
+  # requests:
+  #   cpu: 100m
+  #   memory: 128Mi
+
+# Additional volumes
+volumes: []
+
+# Additional volumeMounts
+volumeMounts: []
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
