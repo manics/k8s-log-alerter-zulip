@@ -147,5 +147,5 @@ jobs:
         uses: manics/helm-gh-pages-action@v0.1.0
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          chart-dir: chart
+          chart-dir: helm-chart
           github-user: ${{ env.COMMIT_USER }}
