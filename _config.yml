@@ -1,0 +1,6 @@
+# title: github.repository_name
+# description: github.project_tagline
+
+theme: jekyll-theme-minimal
+# index.yaml is in the root
+data_dir: ./
