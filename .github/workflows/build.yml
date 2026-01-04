@@ -12,6 +12,9 @@ env:
   PUBLISH_BRANCH: "main"
   PLATFORMS: linux/amd64,linux/arm64
 
+  COMMIT_USER: manics-bot
+  VALIDATE_KUBERNETES_VERSION: "1.30.6"
+
 jobs:
   lint:
     name: Lint
@@ -26,6 +29,14 @@ jobs:
         with:
           version: v2.7.2
           working-directory: ./src
+
+      - name: Install kubeconform
+        run: curl -sfL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar -C /usr/local/bin -xzf - kubeconform
+
+      - name: Lint helm-chart
+        run: |
+          helm lint helm-chart/
+          helm template helm-chart/ | kubeconform -strict -verbose -kubernetes-version "$VALIDATE_KUBERNETES_VERSION"
 
   test:
     name: Test
@@ -102,3 +113,28 @@ jobs:
             }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  helm-chart:
+    name: Publish chart
+    runs-on: ubuntu-24.04
+    needs:
+      - container
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Update Chart.yaml version with tag
+        run: |
+          export VERSION=${{ github.ref_name }}
+          yq --inplace '.version = env(VERSION), .appVersion = env(VERSION)' helm-chart/Chart.yaml
+          git diff
+
+      - name: Publish to gh-pages
+        uses: manics/helm-gh-pages-action@v0.1.0
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          chart-dir: chart
+          github-user: ${{ env.COMMIT_USER }}
