@@ -3,7 +3,11 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"log"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
@@ -13,7 +17,62 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	clientv1 "k8s.io/client-go/kubernetes/typed/core/v1"
+	fakecorev1 "k8s.io/client-go/kubernetes/typed/core/v1/fake"
+	restclient "k8s.io/client-go/rest"
+	fakerest "k8s.io/client-go/rest/fake"
 )
+
+// MockPods implements clientv1.PodInterface and overrides GetLogs
+type MockPods struct {
+	clientv1.PodInterface
+	podLogs map[string][]string
+	t       *testing.T
+}
+
+// GetLogs overrides the fake pod logs
+// https://github.com/kubernetes/client-go/blob/v0.35.0/kubernetes/typed/core/v1/fake/fake_pod_expansion.go#L67-L79
+func (m *MockPods) GetLogs(name string, opts *corev1.PodLogOptions) *restclient.Request {
+	logs, ok := m.podLogs[name]
+	if !ok {
+		m.t.Fatalf("No logs")
+	}
+
+	fakeClient := &fakerest.RESTClient{
+		Client: fakerest.CreateHTTPClient(func(request *http.Request) (*http.Response, error) {
+			resp := &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(strings.Join(logs, "\n"))),
+			}
+			return resp, nil
+		}),
+	}
+	return fakeClient.Request()
+}
+
+// MockCoreV1 is a mock implementation of clientv1.CoreV1Interface
+type MockCoreV1 struct {
+	fakecorev1.FakeCoreV1
+	podLogs map[string][]string
+}
+
+// Pods overrides the default Pods method to return MockPods
+func (m *MockCoreV1) Pods(namespace string) clientv1.PodInterface {
+	return &MockPods{
+		PodInterface: m.FakeCoreV1.Pods(namespace),
+		podLogs:      m.podLogs,
+	}
+}
+
+// MockClientset is a mock k8s client
+type MockClientset struct {
+	*fake.Clientset
+	mockCoreV1 *MockCoreV1
+}
+
+func (c *MockClientset) CoreV1() clientv1.CoreV1Interface {
+	return c.mockCoreV1
+}
 
 func TestConfigLoad(t *testing.T) {
 	cfg, err := loadConfig("../config.json")
@@ -156,20 +215,73 @@ func TestFormatZulipContent(t *testing.T) {
 	}
 }
 
+func waitForLog(buf *bytes.Buffer, expected string) error {
+	for range 20 {
+		if strings.Contains(buf.String(), expected) {
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return fmt.Errorf("Did not find expected log message '%s':\n%s", expected, buf.String())
+}
+
+func mockZulipServer(t *testing.T) *httptest.Server {
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/messages" {
+			t.Fatalf("Unexpected path: %s", r.URL.Path)
+		}
+		if r.Method != "POST" {
+			t.Fatalf("Unexpected method: %s", r.Method)
+		}
+		if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
+			t.Fatalf("Unexpected Content-Type: %s", r.Header.Get("Content-Type"))
+		}
+
+		if err := r.ParseForm(); err != nil {
+			t.Fatalf("Error parsing form: %v", err)
+		}
+
+		for _, field := range []string{"type", "to", "topic", "content"} {
+			if r.Form.Get(field) == "" {
+				t.Fatalf("Missing form field: %s", field)
+			}
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+}
+
 func TestRunWatcher(t *testing.T) {
-	// Test the watcher by capturing the logs that are output when a matching pod is started/stopped
+	// Test the watcher by capturing the logs that are output when a matching pod is started/stopped, or a mesage matches the rule
 	var buf bytes.Buffer
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 
+	const TEST_LOG_MESSAGE = "[test] log message"
+
 	// Setup fake client
-	client := fake.NewClientset()
+	baseClient := fake.NewClientset()
+	mockLogs := map[string][]string{
+		"test-pod": {"[fail] This message shouldn't match", TEST_LOG_MESSAGE},
+	}
+
+	baseClient.Resources = append(baseClient.Resources, &metav1.APIResourceList{
+		GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods", Namespaced: true, Kind: "Pod"}},
+	})
+
+	coreClient := &MockCoreV1{
+		FakeCoreV1: *baseClient.CoreV1().(*fakecorev1.FakeCoreV1),
+		podLogs:    mockLogs,
+	}
+	client := &MockClientset{
+		Clientset:  baseClient,
+		mockCoreV1: coreClient,
+	}
 
 	// Setup rule
 	rule := &Rule{
 		Name:      "Test Rule",
 		PodLabels: map[string]string{"app": "test"},
-		Regex:     ".*",
+		Regex:     "\\[test\\]",
 	}
 	var err error
 	rule.Compiled, err = regexp.Compile(rule.Regex)
@@ -177,7 +289,16 @@ func TestRunWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// Mock Zulip server
+	zulipServer := mockZulipServer(t)
+	defer zulipServer.Close()
+
+	// Setup Zulip config
 	zulipCfg := &ZulipConfig{
+		Site:             zulipServer.URL,
+		BotEmail:         "bot@example.com",
+		BotKey:           "secret",
+		Channel:          "alerts",
 		MaxMessageLength: 10000,
 	}
 
@@ -193,7 +314,7 @@ func TestRunWatcher(t *testing.T) {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-pod",
-			Namespace: "default",
+			Namespace: "ns",
 			Labels:    map[string]string{"app": "test"},
 			UID:       "uid-1",
 		},
@@ -204,50 +325,57 @@ func TestRunWatcher(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	_, err = client.CoreV1().Pods("default").Create(ctx, pod, metav1.CreateOptions{})
+	_, err = client.CoreV1().Pods("ns").Create(ctx, pod, metav1.CreateOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Wait for log message indicating the watcher picked up the pod
-	expected := "Watching logs for pod test-pod[test-container]"
-	success := false
-	for range 20 {
-		if strings.Contains(buf.String(), expected) {
-			success = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := waitForLog(&buf, "Watching logs for pod test-pod[test-container]"); err != nil {
+		t.Fatal(err)
 	}
 
-	if !success {
-		t.Errorf("Did not find expected log message '%s':\n%s", expected, buf.String())
-	}
+	// Useful for debugging failures
+	t.Log(buf.String())
 
-	// TODO: check that matching pod logs generate an alert (need to mock Zulip)
+	// Wait for log indicating the rule was matched
+	if err := waitForLog(&buf, fmt.Sprintf("[Test Rule] pod test-pod[test-container] Message: %s", TEST_LOG_MESSAGE)); err != nil {
+		t.Fatal(err)
+	}
 
 	// Stop the pod
-	err = client.CoreV1().Pods("default").Delete(ctx, "test-pod", metav1.DeleteOptions{})
+	err = client.CoreV1().Pods("ns").Delete(ctx, "test-pod", metav1.DeleteOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Wait for log message indicating the watcher stopped watching the pod
-	expected = "Stopped watching logs for pod test-pod[test-container]"
-	success = false
-	for range 20 {
-		if strings.Contains(buf.String(), expected) {
-			success = true
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
+	if err := waitForLog(&buf, "Stopped watching logs for pod test-pod[test-container]"); err != nil {
+		t.Fatal(err)
 	}
 
-	if !success {
-		t.Errorf(
-			"Did not find expected log message '%s' after pod deletion:\n%s",
-			expected,
-			buf.String(),
-		)
+	// Now check the full set of logs
+	if strings.Contains(buf.String(), "[fail]") {
+		t.Fatal("Error: '[fail]' should not have been matched")
+	}
+
+	expected_logs := []string{
+		"Starting watcher for rule 'Test Rule' labels: app=test",
+		"Watching logs for pod test-pod[test-container]",
+		"[Test Rule] pod test-pod[test-container] Message: " + TEST_LOG_MESSAGE,
+		"Stopped watching logs for pod test-pod[test-container]",
+	}
+
+	logs := strings.Split(strings.TrimSpace(buf.String()), "\n")
+	if len(expected_logs) != len(logs) {
+		t.Fatalf("Expected %d logs, got %d", len(expected_logs), len(logs))
+	}
+
+	for idx, log := range logs {
+		// Skip date/time
+		log = log[20:]
+		if log != expected_logs[idx] {
+			t.Errorf("Expected log '%s', got '%s'", expected_logs[idx], log)
+		}
 	}
 }
