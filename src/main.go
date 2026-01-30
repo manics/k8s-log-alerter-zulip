@@ -6,10 +6,8 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"os/signal"
 	"regexp"
@@ -18,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"k8s-log-alerter-zulip/internal"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -28,16 +27,8 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Zulip ZulipConfig     `json:"zulip"`
-	Rules map[string]Rule `json:"rules"`
-}
-
-type ZulipConfig struct {
-	Site             string `json:"site"`
-	BotEmail         string `json:"bot_email"`
-	BotKey           string `json:"bot_key"`
-	Channel          string `json:"channel"`
-	MaxMessageLength int    `json:"-"`
+	Zulip internal.ZulipConfig `json:"zulip"`
+	Rules map[string]Rule      `json:"rules"`
 }
 
 type Rule struct {
@@ -45,16 +36,6 @@ type Rule struct {
 	PodLabels map[string]string `json:"pod_labels"`
 	Regex     string            `json:"regex"`
 	Compiled  *regexp.Regexp    `json:"-"`
-}
-
-// Shared HTTP client to enable connection pooling
-var httpClient = &http.Client{
-	Timeout: 10 * time.Second,
-	Transport: &http.Transport{
-		MaxIdleConns:       10,
-		IdleConnTimeout:    30 * time.Second,
-		DisableCompression: true,
-	},
 }
 
 // loadConfig loads a configuration file
@@ -164,7 +145,7 @@ func runWatcher(
 	ctx context.Context,
 	client kubernetes.Interface,
 	rule *Rule,
-	zulipCfg *ZulipConfig,
+	zulipClient *internal.ZulipClient,
 	namespace string,
 	health *HealthChecker,
 ) {
@@ -218,7 +199,7 @@ func runWatcher(
 								pod,
 								&container,
 								rule,
-								zulipCfg,
+								zulipClient,
 								func() {
 									mu.Lock()
 									delete(activeStreams, key)
@@ -253,7 +234,7 @@ func streamLogs(
 	pod *corev1.Pod,
 	container *corev1.Container,
 	rule *Rule,
-	zulipCfg *ZulipConfig,
+	zulipClient *internal.ZulipClient,
 	cleanup func(),
 ) {
 	defer cleanup()
@@ -294,7 +275,7 @@ func streamLogs(
 		for scanner.Scan() {
 			line := scanner.Text()
 			if rule.Compiled.MatchString(line) {
-				sendZulipAlert(zulipCfg, rule, pod, container, line)
+				zulipClient.SendAlert(rule.Name, pod, container, line)
 			}
 		}
 		if err := stream.Close(); err != nil {
@@ -320,137 +301,6 @@ func streamLogs(
 		} else {
 			return
 		}
-	}
-}
-
-// formatZulipContent creates the Zulip message content
-//
-// Message longer than maxLength are truncated and … is appended. If a message
-// appears to be JSON it is pretty-printed
-func formatZulipContent(
-	pod *corev1.Pod,
-	container *corev1.Container,
-	message string,
-	maxLength int,
-) string {
-	prefix := fmt.Sprintf("**Pod**: %s[%s]@%s\n", pod.Name, container.Name, pod.Spec.NodeName)
-
-	maxLogLength := maxLength - len(prefix)
-
-	if len(message) > maxLogLength {
-		message = message[:maxLogLength-2] + " …"
-	} else {
-		// Try pretty printing as JSON, but not if it ends up being too long
-		var obj any
-		if err := json.Unmarshal([]byte(message), &obj); err == nil {
-			if indented, err := json.MarshalIndent(obj, "", "  "); err == nil {
-				json_message := "```json\n" + string(indented) + "\n```"
-				if len(json_message) <= maxLogLength {
-					message = json_message
-				}
-			}
-		}
-	}
-	// else message is unchanged
-
-	return fmt.Sprintf("%s%s", prefix, message)
-}
-
-// getZulipDetails checks the Zulip credentials are valid and gets the maximum message length
-func getZulipDetails(cfg *ZulipConfig) error {
-	// https://zulip.com/api/register-queue
-	data := url.Values{}
-	data.Set("event_types", "[\"realm\"]")
-
-	apiURL := strings.TrimRight(cfg.Site, "/") + "/api/v1/register"
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		return fmt.Errorf("error creating request: %v", err)
-	}
-
-	req.SetBasicAuth(cfg.BotEmail, cfg.BotKey)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		return fmt.Errorf("error checking Zulip auth: %v", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("error checking Zulip auth (%s): %s", resp.Status, string(body))
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return fmt.Errorf("error reading Zulip auth response: %v", err)
-	}
-
-	var response map[string]any
-	if err := json.Unmarshal(body, &response); err != nil {
-		return fmt.Errorf("error parsing Zulip auth response: %v", err)
-	}
-
-	if result, ok := response["result"]; !ok || result != "success" {
-		return fmt.Errorf("failed to authenticate with Zulip: %v", response)
-	}
-
-	log.Printf("Successfully authenticated with Zulip")
-
-	if maxLen, ok := response["max_message_length"].(float64); ok {
-		cfg.MaxMessageLength = int(maxLen)
-	} else {
-		return fmt.Errorf("failed to get max_message_length from Zulip")
-	}
-
-	if cfg.MaxMessageLength < 256 {
-		return fmt.Errorf("server max_message_length is too small: %d", cfg.MaxMessageLength)
-	}
-
-	log.Printf("Maximum message length: %d", cfg.MaxMessageLength)
-	return nil
-}
-
-// sendZulipAlert sends a message to a Zulip channel with topic set to the rule name
-func sendZulipAlert(
-	cfg *ZulipConfig,
-	rule *Rule,
-	pod *corev1.Pod,
-	container *corev1.Container,
-	message string,
-) {
-	log.Printf("[%s] pod %s[%s] Message: %s", rule.Name, pod.Name, container.Name, message)
-	content := formatZulipContent(pod, container, message, cfg.MaxMessageLength)
-
-	data := url.Values{}
-	data.Set("type", "stream")
-	data.Set("to", cfg.Channel)
-	data.Set("topic", rule.Name)
-	data.Set("content", content)
-
-	apiURL := strings.TrimRight(cfg.Site, "/") + "/api/v1/messages"
-
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
-	if err != nil {
-		log.Printf("Error creating request: %v", err)
-		return
-	}
-
-	req.SetBasicAuth(cfg.BotEmail, cfg.BotKey)
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := httpClient.Do(req)
-	if err != nil {
-		log.Printf("Error sending alert to Zulip: %v", err)
-		return
-	}
-	defer resp.Body.Close() //nolint:errcheck
-
-	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Error response from Zulip (%s): %s", resp.Status, string(body))
 	}
 }
 
@@ -491,11 +341,9 @@ func main() {
 		log.Fatalf("Failed to load config %s: %v", configPath, err)
 	}
 
-	{
-		err := getZulipDetails(&cfg.Zulip)
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
+	zulipClient, err := internal.NewZulipClient(&cfg.Zulip)
+	if err != nil {
+		log.Fatalf("%v", err)
 	}
 
 	clientset, currentNamespace, err := k8sClient()
@@ -551,7 +399,7 @@ func main() {
 		wg.Add(1)
 		go func(r Rule) {
 			defer wg.Done()
-			runWatcher(ctx, clientset, &r, &cfg.Zulip, namespace, health)
+			runWatcher(ctx, clientset, &r, zulipClient, namespace, health)
 		}(rule)
 	}
 

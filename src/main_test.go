@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s-log-alerter-zulip/internal"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -179,61 +180,6 @@ func TestConfigLoadNoRules(t *testing.T) {
 	}
 }
 
-func TestFormatZulipContent(t *testing.T) {
-	pod := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "test-pod",
-		},
-		Spec: corev1.PodSpec{
-			NodeName: "test-node",
-		},
-	}
-	container := &corev1.Container{
-		Name: "test-container",
-	}
-
-	tests := []struct {
-		name     string
-		message  string
-		expected string
-	}{
-		{
-			name:     "Plain text",
-			message:  "Something happened",
-			expected: "**Pod**: test-pod[test-container]@test-node\nSomething happened",
-		},
-		{
-			name:     "JSON message",
-			message:  `{"a":2}`,
-			expected: "**Pod**: test-pod[test-container]@test-node\n```json\n{\n  \"a\": 2\n}\n```",
-		},
-		{
-			name:     "Invalid JSON",
-			message:  `{"key": "value"`,
-			expected: "**Pod**: test-pod[test-container]@test-node\n{\"key\": \"value\"",
-		},
-		{
-			name:     "Long message",
-			message:  `abcdefghijklmnopqrstuvwxyz`,
-			expected: "**Pod**: test-pod[test-container]@test-node\nabcdefghijklmnopqrstuv …",
-		},
-		{
-			name:     "Pretty JSON too long",
-			message:  `{"a":{"b":1}}`,
-			expected: "**Pod**: test-pod[test-container]@test-node\n{\"a\":{\"b\":1}}",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := formatZulipContent(pod, container, tt.message, 68)
-			if got != tt.expected {
-				t.Errorf("formatZulipContent() = %v, want %v", got, tt.expected)
-			}
-		})
-	}
-}
-
 func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 	for range 20 {
 		if strings.Contains(buf.String(), expected) {
@@ -246,6 +192,15 @@ func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 
 func mockZulipServer(t *testing.T) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/register" {
+			if _, err := w.Write(
+				[]byte(`{"result": "success", "max_message_length": 10000}`),
+			); err != nil {
+				t.Fatal(err)
+			}
+			return
+		}
+
 		if r.URL.Path != "/api/v1/messages" {
 			t.Fatalf("Unexpected path: %s", r.URL.Path)
 		}
@@ -313,7 +268,7 @@ func TestRunWatcher(t *testing.T) {
 	defer zulipServer.Close()
 
 	// Setup Zulip config
-	zulipCfg := &ZulipConfig{
+	zulipCfg := &internal.ZulipConfig{
 		Site:             zulipServer.URL,
 		BotEmail:         "bot@example.com",
 		BotKey:           "secret",
@@ -321,10 +276,15 @@ func TestRunWatcher(t *testing.T) {
 		MaxMessageLength: 10000,
 	}
 
+	zulipClient, err := internal.NewZulipClient(zulipCfg)
+	if err != nil {
+		t.Fatalf("Failed to create zulip client: %v", err)
+	}
+
 	ctx := t.Context()
 
 	// Run watcher in a goroutine
-	go runWatcher(ctx, client, rule, zulipCfg, "", &HealthChecker{})
+	go runWatcher(ctx, client, rule, zulipClient, "", &HealthChecker{})
 
 	// Allow watcher to start
 	time.Sleep(100 * time.Millisecond)
@@ -379,6 +339,8 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	expected_logs := []string{
+		"Successfully authenticated with Zulip",
+		"Maximum message length: 10000",
 		"Starting watcher for rule 'Test Rule' labels: app=test",
 		"Watching logs for pod test-pod[test-container]",
 		"[Test Rule] pod test-pod[test-container] Message: " + TEST_LOG_MESSAGE,
