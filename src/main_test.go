@@ -11,6 +11,7 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -72,6 +73,24 @@ type MockClientset struct {
 
 func (c *MockClientset) CoreV1() clientv1.CoreV1Interface {
 	return c.mockCoreV1
+}
+
+// ThreadSafeBuffer is a wrapper around bytes.Buffer that is safe for concurrent use.
+type ThreadSafeBuffer struct {
+	b bytes.Buffer
+	m sync.Mutex
+}
+
+func (b *ThreadSafeBuffer) Write(p []byte) (n int, err error) {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *ThreadSafeBuffer) String() string {
+	b.m.Lock()
+	defer b.m.Unlock()
+	return b.b.String()
 }
 
 func TestConfigLoad(t *testing.T) {
@@ -215,7 +234,7 @@ func TestFormatZulipContent(t *testing.T) {
 	}
 }
 
-func waitForLog(buf *bytes.Buffer, expected string) error {
+func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 	for range 20 {
 		if strings.Contains(buf.String(), expected) {
 			return nil
@@ -252,7 +271,7 @@ func mockZulipServer(t *testing.T) *httptest.Server {
 
 func TestRunWatcher(t *testing.T) {
 	// Test the watcher by capturing the logs that are output when a matching pod is started/stopped, or a mesage matches the rule
-	var buf bytes.Buffer
+	buf := ThreadSafeBuffer{}
 	log.SetOutput(&buf)
 	defer log.SetOutput(os.Stderr)
 
