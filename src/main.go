@@ -90,44 +90,6 @@ func k8sClient() (*kubernetes.Clientset, string, error) {
 	return clientset, namespace, nil
 }
 
-// HealthChecker tracks the health of the application
-type HealthChecker struct {
-	mu sync.Mutex
-	// errors indicates whether a rule name has an error
-	errors map[string]error
-}
-
-// Report marks or unmarks a rule name as having an error
-func (h *HealthChecker) Report(rule string, err error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if h.errors == nil {
-		h.errors = make(map[string]error)
-	}
-	if err != nil {
-		h.errors[rule] = err
-	} else {
-		delete(h.errors, rule)
-	}
-}
-
-func (h *HealthChecker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.errors) > 0 {
-		w.WriteHeader(http.StatusInternalServerError)
-		for r, e := range h.errors {
-			if _, err := fmt.Fprintf(w, "Error in rule '%s': %v\n", r, e); err != nil {
-				log.Printf("Failed to write response: %v", err)
-			}
-		}
-		return
-	}
-	w.WriteHeader(http.StatusOK)
-	if _, err := w.Write([]byte("ok")); err != nil {
-		log.Printf("Failed to write response: %v", err)
-	}
-}
 type logWriter struct{}
 
 // Write is a custom logger that outputs the timestamp as ISO8601 UTC
@@ -188,7 +150,7 @@ func main() {
 
 	log.Printf("Using namespace: %s", namespace)
 
-	health := &HealthChecker{}
+	health := &internal.HealthChecker{}
 
 	// We've validated that we can connect to the K8s API so now we'll report on whether
 	// any of the rule watchers have failed

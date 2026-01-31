@@ -284,7 +284,7 @@ func TestRunWatcher(t *testing.T) {
 	ctx := t.Context()
 
 	// Run watcher in a goroutine
-	go internal.RunWatcher(ctx, client, rule, zulipClient, "", &HealthChecker{})
+	go internal.RunWatcher(ctx, client, rule, zulipClient, "", &internal.HealthChecker{})
 
 	// Allow watcher to start
 	time.Sleep(100 * time.Millisecond)
