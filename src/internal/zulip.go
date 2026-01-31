@@ -136,6 +136,7 @@ func (c *ZulipClient) checkAuth() error {
 }
 
 // SendAlert sends a message to a Zulip channel with topic set to the rule name
+// TODO: Add error return
 func (c *ZulipClient) SendAlert(
 	topic string,
 	pod *corev1.Pod,
