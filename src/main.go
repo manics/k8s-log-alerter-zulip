@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"k8s-log-alerter-zulip/internal"
 	"log"
 	"net/http"
 	"os"
@@ -15,7 +16,6 @@ import (
 	"syscall"
 	"time"
 
-	"k8s-log-alerter-zulip/internal"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -75,7 +75,9 @@ func k8sClient() (*kubernetes.Clientset, string, error) {
 		if err != nil {
 			return nil, "", fmt.Errorf("failed to load kubernetes config: %w", err)
 		}
-		if data, err := os.ReadFile("/var/run/secrets/kubernetes.io/serviceaccount/namespace"); err == nil {
+		if data, err := os.ReadFile(
+			"/var/run/secrets/kubernetes.io/serviceaccount/namespace",
+		); err == nil {
 			namespace = strings.TrimSpace(string(data))
 		}
 	} else {

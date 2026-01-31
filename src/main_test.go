@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"k8s-log-alerter-zulip/internal"
 	"log"
 	"net/http"
 	"net/http/httptest"
@@ -15,7 +16,6 @@ import (
 	"testing"
 	"time"
 
-	"k8s-log-alerter-zulip/internal"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -318,7 +318,10 @@ func TestRunWatcher(t *testing.T) {
 	t.Log(buf.String())
 
 	// Wait for log indicating the rule was matched
-	if err := waitForLog(&buf, fmt.Sprintf("[Test Rule] pod test-pod[test-container] Message: %s", TEST_LOG_MESSAGE)); err != nil {
+	if err := waitForLog(
+		&buf,
+		fmt.Sprintf("[Test Rule] pod test-pod[test-container] Message: %s", TEST_LOG_MESSAGE),
+	); err != nil {
 		t.Fatal(err)
 	}
 
@@ -329,7 +332,10 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	// Wait for log message indicating the watcher stopped watching the pod
-	if err := waitForLog(&buf, "Stopped watching logs for pod test-pod[test-container]"); err != nil {
+	if err := waitForLog(
+		&buf,
+		"Stopped watching logs for pod test-pod[test-container]",
+	); err != nil {
 		t.Fatal(err)
 	}
 

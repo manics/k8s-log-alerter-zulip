@@ -104,8 +104,19 @@ func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 // MockAlerter implements Alerter for testing
 type MockAlerter struct{}
 
-func (m *MockAlerter) SendAlert(topic string, pod *corev1.Pod, container *corev1.Container, message string) {
-	log.Printf("MockAlerter topic='%s' pod=%s container=%s message=%s", topic, pod.Name, container.Name, message)
+func (m *MockAlerter) SendAlert(
+	topic string,
+	pod *corev1.Pod,
+	container *corev1.Container,
+	message string,
+) {
+	log.Printf(
+		"MockAlerter topic='%s' pod=%s container=%s message=%s",
+		topic,
+		pod.Name,
+		container.Name,
+		message,
+	)
 }
 
 func TestRunWatcher(t *testing.T) {
