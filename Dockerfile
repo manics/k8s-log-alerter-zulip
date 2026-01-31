@@ -7,6 +7,7 @@ WORKDIR /app
 COPY src/go.* /app/
 RUN go mod download
 
+COPY src/internal /app/internal
 COPY src/*.go /app/
 # Remove compiled in paths, reduce binary size by omitting
 # DWARF symbol table, symbol table and debug information

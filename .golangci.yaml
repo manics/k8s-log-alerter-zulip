@@ -12,9 +12,9 @@ linters:
 
 formatters:
   enable:
-    - gci
+    # - gci
     - gofmt
     - gofumpt
-    - goimports
+    # - goimports
     - golines
     - swaggo

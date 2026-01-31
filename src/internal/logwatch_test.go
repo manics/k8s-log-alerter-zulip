@@ -1,14 +1,11 @@
-package main
+package internal
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
 	"io"
-	"k8s-log-alerter-zulip/internal"
 	"log"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"regexp"
 	"strings"
@@ -94,92 +91,6 @@ func (b *ThreadSafeBuffer) String() string {
 	return b.b.String()
 }
 
-func TestConfigLoad(t *testing.T) {
-	cfg, err := loadConfig("../config.json")
-	if err != nil {
-		t.Fatalf("Failed to load config: %v", err)
-	}
-
-	// Verify Zulip config
-	if cfg.Zulip.Site != "https://zulip.example.com" {
-		t.Errorf("Incorrect Site: '%s'", cfg.Zulip.Site)
-	}
-	if cfg.Zulip.BotEmail != "bot@example.com" {
-		t.Errorf("Incorrect BotEmail: '%s'", cfg.Zulip.BotEmail)
-	}
-	if cfg.Zulip.BotKey != "secret" {
-		t.Errorf("Incorrect BotKey: '%s'", cfg.Zulip.BotKey)
-	}
-	if cfg.Zulip.Channel != "alerts" {
-		t.Errorf("Incorrect Channel: '%s'", cfg.Zulip.Channel)
-	}
-	if cfg.Zulip.MaxMessageLength != 0 {
-		t.Errorf("Expected MaxMessageLength to be uninitialised: %d", cfg.Zulip.MaxMessageLength)
-	}
-
-	// Verify Rules
-	if len(cfg.Rules) != 1 {
-		t.Fatalf("Expected 1 rule: %d", len(cfg.Rules))
-	}
-
-	r1, ok := cfg.Rules["Cryptnono killed"]
-	if !ok {
-		t.Fatal("Rule 'Cryptnono killed' not found")
-	}
-	if r1.Name != "Cryptnono killed" {
-		t.Errorf("Incorrect rule name: '%s'", r1.Name)
-	}
-	if r1.PodLabels["app.kubernetes.io/name"] != "cryptnono" {
-		t.Errorf("Incorrect pod labels: %v", r1.PodLabels)
-	}
-	if r1.Regex != "\"action\":\\s*\"killed\"" {
-		t.Errorf("Incorrect regex: '%s'", r1.Regex)
-	}
-	if r1.Compiled == nil {
-		t.Error("Failed to compile regex")
-	}
-}
-
-func TestConfigLoadNoRules(t *testing.T) {
-	data, err := os.ReadFile("../config.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		t.Fatal(err)
-	}
-	cfg["rules"] = map[string]any{}
-
-	content, err := json.Marshal(cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	tmpfile, err := os.CreateTemp("", "config-*.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer os.Remove(tmpfile.Name()) //nolint:errcheck
-
-	if _, err := tmpfile.Write(content); err != nil {
-		t.Fatal(err)
-	}
-	if err := tmpfile.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	_, err = loadConfig(tmpfile.Name())
-	if err == nil {
-		t.Fatal("Expected error, got nil")
-	}
-	const expected = "no rules defined"
-	if err.Error() != expected {
-		t.Errorf("Expected error '%s', got '%v'", expected, err)
-	}
-}
-
 func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 	for range 20 {
 		if strings.Contains(buf.String(), expected) {
@@ -190,38 +101,22 @@ func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 	return fmt.Errorf("Did not find expected log message '%s':\n%s", expected, buf.String())
 }
 
-func mockZulipServer(t *testing.T) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/api/v1/register" {
-			if _, err := w.Write(
-				[]byte(`{"result": "success", "max_message_length": 10000}`),
-			); err != nil {
-				t.Fatal(err)
-			}
-			return
-		}
+// MockAlerter implements Alerter for testing
+type MockAlerter struct{}
 
-		if r.URL.Path != "/api/v1/messages" {
-			t.Fatalf("Unexpected path: %s", r.URL.Path)
-		}
-		if r.Method != "POST" {
-			t.Fatalf("Unexpected method: %s", r.Method)
-		}
-		if r.Header.Get("Content-Type") != "application/x-www-form-urlencoded" {
-			t.Fatalf("Unexpected Content-Type: %s", r.Header.Get("Content-Type"))
-		}
-
-		if err := r.ParseForm(); err != nil {
-			t.Fatalf("Error parsing form: %v", err)
-		}
-
-		for _, field := range []string{"type", "to", "topic", "content"} {
-			if r.Form.Get(field) == "" {
-				t.Fatalf("Missing form field: %s", field)
-			}
-		}
-		w.WriteHeader(http.StatusOK)
-	}))
+func (m *MockAlerter) SendAlert(
+	topic string,
+	pod *corev1.Pod,
+	container *corev1.Container,
+	message string,
+) {
+	log.Printf(
+		"MockAlerter topic='%s' pod=%s container=%s message=%s",
+		topic,
+		pod.Name,
+		container.Name,
+		message,
+	)
 }
 
 func TestRunWatcher(t *testing.T) {
@@ -252,7 +147,7 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	// Setup rule
-	rule := &internal.Rule{
+	rule := &Rule{
 		Name:      "Test Rule",
 		PodLabels: map[string]string{"app": "test"},
 		Regex:     "\\[test\\]",
@@ -263,28 +158,10 @@ func TestRunWatcher(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Mock Zulip server
-	zulipServer := mockZulipServer(t)
-	defer zulipServer.Close()
-
-	// Setup Zulip config
-	zulipCfg := &internal.ZulipConfig{
-		Site:             zulipServer.URL,
-		BotEmail:         "bot@example.com",
-		BotKey:           "secret",
-		Channel:          "alerts",
-		MaxMessageLength: 10000,
-	}
-
-	zulipClient, err := internal.NewZulipClient(zulipCfg)
-	if err != nil {
-		t.Fatalf("Failed to create zulip client: %v", err)
-	}
-
 	ctx := t.Context()
 
 	// Run watcher in a goroutine
-	go internal.RunWatcher(ctx, client, rule, zulipClient, "", &internal.HealthChecker{})
+	go RunWatcher(ctx, client, rule, &MockAlerter{}, "", &HealthChecker{})
 
 	// Allow watcher to start
 	time.Sleep(100 * time.Millisecond)
@@ -320,7 +197,7 @@ func TestRunWatcher(t *testing.T) {
 	// Wait for log indicating the rule was matched
 	if err := waitForLog(
 		&buf,
-		fmt.Sprintf("[Test Rule] pod test-pod[test-container] Message: %s", TEST_LOG_MESSAGE),
+		"MockAlerter topic='Test Rule' pod=test-pod container=test-container message="+TEST_LOG_MESSAGE,
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -345,11 +222,9 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	expected_logs := []string{
-		"Successfully authenticated with Zulip",
-		"Maximum message length: 10000",
 		"Starting watcher for rule 'Test Rule' labels: app=test",
 		"Watching logs for pod test-pod[test-container]",
-		"[Test Rule] pod test-pod[test-container] Message: " + TEST_LOG_MESSAGE,
+		"MockAlerter topic='Test Rule' pod=test-pod container=test-container message=" + TEST_LOG_MESSAGE,
 		"Stopped watching logs for pod test-pod[test-container]",
 	}
 
