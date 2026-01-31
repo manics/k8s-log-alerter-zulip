@@ -95,7 +95,7 @@ func (b *ThreadSafeBuffer) String() string {
 }
 
 func TestConfigLoad(t *testing.T) {
-	cfg, err := loadConfig("../config.json")
+	cfg, err := loadConfig("config.json")
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -141,7 +141,7 @@ func TestConfigLoad(t *testing.T) {
 }
 
 func TestConfigLoadNoRules(t *testing.T) {
-	data, err := os.ReadFile("../config.json")
+	data, err := os.ReadFile("config.json")
 	if err != nil {
 		t.Fatal(err)
 	}
