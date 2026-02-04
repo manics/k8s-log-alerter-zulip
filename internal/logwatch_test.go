@@ -7,12 +7,12 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -102,14 +102,17 @@ func waitForLog(buf *ThreadSafeBuffer, expected string) error {
 }
 
 // MockAlerter implements Alerter for testing
-type MockAlerter struct{}
+type MockAlerter struct {
+	messages []string
+}
 
 func (m *MockAlerter) SendAlert(
 	topic string,
 	pod *corev1.Pod,
 	container *corev1.Container,
 	message string,
-) {
+) error {
+	m.messages = append(m.messages, message)
 	log.Printf(
 		"MockAlerter topic='%s' pod=%s container=%s message=%s",
 		topic,
@@ -117,6 +120,7 @@ func (m *MockAlerter) SendAlert(
 		container.Name,
 		message,
 	)
+	return nil
 }
 
 func TestRunWatcher(t *testing.T) {
@@ -148,20 +152,21 @@ func TestRunWatcher(t *testing.T) {
 
 	// Setup rule
 	rule := &Rule{
-		Name:      "Test Rule",
 		PodLabels: map[string]string{"app": "test"},
 		Regex:     "\\[test\\]",
 	}
-	var err error
-	rule.Compiled, err = regexp.Compile(rule.Regex)
-	if err != nil {
+	if err := rule.Init("Test Rule"); err != nil {
 		t.Fatal(err)
 	}
 
 	ctx := t.Context()
 
 	// Run watcher in a goroutine
-	go RunWatcher(ctx, client, rule, &MockAlerter{}, "", &HealthChecker{})
+	go func() {
+		if err := RunWatcher(ctx, client, rule, &MockAlerter{}, "", &HealthChecker{}); err != nil {
+			t.Errorf("RunWatcher failed: %v", err)
+		}
+	}()
 
 	// Allow watcher to start
 	time.Sleep(100 * time.Millisecond)
@@ -181,8 +186,7 @@ func TestRunWatcher(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
-	_, err = client.CoreV1().Pods("ns").Create(ctx, pod, metav1.CreateOptions{})
-	if err != nil {
+	if _, err := client.CoreV1().Pods("ns").Create(ctx, pod, metav1.CreateOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -203,8 +207,9 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	// Stop the pod
-	err = client.CoreV1().Pods("ns").Delete(ctx, "test-pod", metav1.DeleteOptions{})
-	if err != nil {
+	if err := client.CoreV1().
+		Pods("ns").
+		Delete(ctx, "test-pod", metav1.DeleteOptions{}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -238,6 +243,144 @@ func TestRunWatcher(t *testing.T) {
 		log = log[20:]
 		if log != expected_logs[idx] {
 			t.Errorf("Expected log '%s', got '%s'", expected_logs[idx], log)
+		}
+	}
+}
+
+func TestEvaluateRule(t *testing.T) {
+	alerter := &MockAlerter{}
+	rateLimiter, err := NewTTLCache(
+		t.Context(),
+		2*time.Second,
+		200*time.Millisecond,
+		func() *rate.Limiter {
+			return rate.NewLimiter(
+				rate.Limit(0.5),
+				// bucket (burst):
+				2,
+			)
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rule := &Rule{
+		PodLabels: map[string]string{"app": "test"},
+		Regex:     "\\[test\\]",
+		// The first (group) is used as the key
+		GroupRegex: "^(g[\\d])-\\w",
+	}
+	if err := rule.Init("Test Rule"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Create a pod that matches
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "ns",
+			Labels:    map[string]string{"app": "test"},
+			UID:       "uid-1",
+		},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "test-container"}},
+			NodeName:   "node-1",
+		},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+
+	testStrings := []string{
+		"[no match]",
+		// Group g1
+		"g1-a [test]",
+		"g1-b [test]",
+		"g1-c [test]",
+		// Group g2
+		"g2-a [test]",
+	}
+
+	for i := range 3 {
+		time.Sleep(500 * time.Millisecond)
+		for _, mark := range testStrings {
+			err := evaluateRule(
+				rule,
+				rateLimiter,
+				alerter,
+				fmt.Sprintf("%s %d", mark, i),
+				pod,
+				&pod.Spec.Containers[0],
+			)
+			if err != nil {
+				t.Errorf("%v", err)
+			}
+		}
+		time.Sleep(600 * time.Millisecond)
+	}
+
+	// This should be enough to reset the limiter, so burst=2 should take effect again
+	time.Sleep(2 * time.Second)
+	for _, mark := range testStrings {
+		err := evaluateRule(
+			rule,
+			rateLimiter,
+			alerter,
+			fmt.Sprintf("%s 😀", mark),
+			pod,
+			&pod.Spec.Containers[0],
+		)
+		if err != nil {
+			t.Errorf("%v", err)
+		}
+	}
+
+	// Regex 'g[1-3]' defines the group identifiers used for rate limiting
+	//
+	// The rate limit is 1/s, but with Burst=2 so "g1-a [test]" and "g1-b [test]"
+	// should appear the first time
+	//
+	// Due to the burst it takes 2s before another alert is allowed for g1
+	// so on the next round all g1 alerts are supressed
+	//
+	// Subsequently the limit of 1/s applies so only "g1-a [test]" for g1 is allowed
+	//
+	// "g2-a [test]" is a different group g2 so is always within the 1/s rate limit
+	expected_messages := []string{
+		// "[no match]", never matches
+
+		"g1-a [test] 0",
+		"g1-b [test] 0",
+		// "g1-c [test] 0", rate limited
+		"g2-a [test] 0",
+
+		// "g1-a [test] 1", rate limited
+		// "g1-b [test] 1", rate limited
+		// "g1-c [test] 1", rate limited
+		"g2-a [test] 1",
+
+		"g1-a [test] 2",
+		// "g1-b [test] 2", rate limited
+		// "g1-c [test] 2", rate limited
+		"g2-a [test] 2",
+
+		// 2s delay means the limits are reset
+
+		"g1-a [test] 😀",
+		"g1-b [test] 😀",
+		// "g1-c [test] 😀", rate limited
+		"g2-a [test] 😀",
+	}
+	if len(expected_messages) != len(alerter.messages) {
+		t.Fatalf(
+			"Expected %d alerts, got %d: %v",
+			len(expected_messages),
+			len(alerter.messages),
+			alerter.messages,
+		)
+	}
+	for idx, message := range alerter.messages {
+		if message != expected_messages[idx] {
+			t.Errorf("[%d] Expected alert '%s', got '%s'", idx, expected_messages[idx], message)
 		}
 	}
 }

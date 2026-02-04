@@ -147,8 +147,12 @@ func TestZulipClient(t *testing.T) {
 			},
 		},
 	}
-	c.SendAlert("topic", pod, &pod.Spec.Containers[0], "message")
-	c.SendAlert("topic", pod, &pod.Spec.Containers[0], "{\"a\":1}")
+	if err := c.SendAlert("topic", pod, &pod.Spec.Containers[0], "message"); err != nil {
+		t.Errorf("Failed to send alert: %v", err)
+	}
+	if err := c.SendAlert("topic", pod, &pod.Spec.Containers[0], "{\"a\":1}"); err != nil {
+		t.Errorf("Failed to send alert: %v", err)
+	}
 
 	// Check all mock server requests
 	if len(mock.requests) != 3 {

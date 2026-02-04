@@ -10,12 +10,11 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -23,8 +22,8 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Zulip internal.ZulipConfig     `json:"zulip"`
-	Rules map[string]internal.Rule `json:"rules"`
+	Zulip internal.ZulipConfig      `json:"zulip"`
+	Rules map[string]*internal.Rule `json:"rules"`
 }
 
 // loadConfig loads a configuration file
@@ -42,13 +41,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	for name, rule := range cfg.Rules {
-		rule.Name = name
-		re, err := regexp.Compile(rule.Regex)
-		if err != nil {
-			return nil, fmt.Errorf("invalid regex for rule %s: %w", name, err)
+		if err := rule.Init(name); err != nil {
+			return nil, fmt.Errorf("invalid rule %s: %w", name, err)
 		}
-		rule.Compiled = re
-		cfg.Rules[name] = rule
 	}
 
 	if len(cfg.Rules) == 0 {
@@ -169,27 +164,30 @@ func main() {
 		}
 	}()
 
-	// Start watchers
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Println("Received shutdown signal, stopping watchers...")
-		cancel()
-	}()
+	// Start watchers, handle graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	g, gCtx := errgroup.WithContext(ctx)
 
 	for _, rule := range cfg.Rules {
-		wg.Add(1)
-		go func(r internal.Rule) {
-			defer wg.Done()
-			internal.RunWatcher(ctx, clientset, &r, zulipClient, namespace, health)
-		}(rule)
+		r := rule
+		g.Go(func() error {
+			if err := internal.RunWatcher(
+				gCtx,
+				clientset,
+				r,
+				zulipClient,
+				namespace,
+				health,
+			); err != nil {
+				return fmt.Errorf("watcher for rule '%s' failed: %w", r.Name, err)
+			}
+			return nil
+		})
 	}
 
-	wg.Wait()
+	if err := g.Wait(); err != nil {
+		cancel()
+		log.Fatalf("Application failed: %v", err)
+	}
+	cancel()
 }

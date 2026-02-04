@@ -13,8 +13,15 @@ Edit `site`, `bot_email`, `bot_key` and `channel` in the configuration file.
 
 The `rules` section is a dictionary where the keys are the rule names which are used as Zulip topics, and values are:
 
-- `pod_labels` is a dicionary of labels to be matched, all containers will be watched
+- `pod_labels` is a dicionary of labels to be matched, matching containers will be watched
 - `regex` is a regular expression that matches logs that should be sent to Zulip
+
+Optionally enable rate limiting (limits apply per rule):
+
+- `group_regex`: Regular expression that contains one (subgroup) which will be used to group logs for rate limiting purposes
+- `limit_first_n`: Rate limiter bucket size, show this number of logs initially
+- `limit_interval_seconds`: Rate limits alerts to this interval between alerts
+- `limit_reset_seconds`: Reset the limiter if there are no alerts for this time period
 
 ## Build
 
@@ -51,6 +58,7 @@ podman run --name log-watcher \
 ```
 
 ## Kubernetes
+
 Create a configuration file with your Zulip connection details and at least one rule, see [`values.yaml`](helm-chart/values.yaml).
 
 ```sh
