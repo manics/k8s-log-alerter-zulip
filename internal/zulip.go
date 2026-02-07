@@ -136,13 +136,12 @@ func (c *ZulipClient) checkAuth() error {
 }
 
 // SendAlert sends a message to a Zulip channel with topic set to the rule name
-// TODO: Add error return
 func (c *ZulipClient) SendAlert(
 	topic string,
 	pod *corev1.Pod,
 	container *corev1.Container,
 	message string,
-) {
+) error {
 	log.Printf("[%s] pod %s[%s] Message: %s", topic, pod.Name, container.Name, message)
 	content := c.FormatContent(pod, container, message)
 
@@ -156,8 +155,7 @@ func (c *ZulipClient) SendAlert(
 
 	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
 	if err != nil {
-		log.Printf("Error creating request: %v", err)
-		return
+		return fmt.Errorf("error creating request: %w", err)
 	}
 
 	req.SetBasicAuth(c.Config.BotEmail, c.Config.BotKey)
@@ -165,13 +163,17 @@ func (c *ZulipClient) SendAlert(
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		log.Printf("Error sending alert to Zulip: %v", err)
-		return
+		return fmt.Errorf("error sending alert to Zulip: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck
 
 	if resp.StatusCode >= 400 {
-		body, _ := io.ReadAll(resp.Body)
-		log.Printf("Error response from Zulip (%s): %s", resp.Status, string(body))
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("error reading Zulip status %d response: %w", resp.StatusCode, err)
+		}
+		return fmt.Errorf("error response from Zulip (%s): %s", resp.Status, string(body))
 	}
+
+	return nil
 }

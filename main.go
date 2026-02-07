@@ -10,12 +10,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"regexp"
 	"strings"
-	"sync"
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/clientcmd"
@@ -23,8 +25,8 @@ import (
 
 // Config represents the application configuration
 type Config struct {
-	Zulip internal.ZulipConfig     `json:"zulip"`
-	Rules map[string]internal.Rule `json:"rules"`
+	Zulip internal.ZulipConfig      `json:"zulip"`
+	Rules map[string]*internal.Rule `json:"rules"`
 }
 
 // loadConfig loads a configuration file
@@ -42,13 +44,9 @@ func loadConfig(path string) (*Config, error) {
 	}
 
 	for name, rule := range cfg.Rules {
-		rule.Name = name
-		re, err := regexp.Compile(rule.Regex)
-		if err != nil {
-			return nil, fmt.Errorf("invalid regex for rule %s: %w", name, err)
+		if err := rule.Init(name); err != nil {
+			return nil, fmt.Errorf("invalid rule %s: %w", name, err)
 		}
-		rule.Compiled = re
-		cfg.Rules[name] = rule
 	}
 
 	if len(cfg.Rules) == 0 {
@@ -108,25 +106,28 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(new(logWriter))
 
-	var configPath string
-	flag.StringVar(&configPath, "c", "", "Path to configuration file")
+	configPath := flag.String("c", "", "Path to configuration file")
 
-	var namespace string
-	flag.StringVar(&namespace, "n", "", "Namespace")
+	namespace := flag.String("n", "", "Namespace")
 
-	var listenAddr string
-	flag.StringVar(&listenAddr, "healthcheck", ":8081", "Address to listen on for health checks")
+	listenAddr := flag.String(
+		"metrics",
+		":8081",
+		"Address to listen on for health checks and metrics",
+	)
+
+	flag.StringVar(listenAddr, "healthcheck", ":8081", "Alias for -metrics")
 
 	flag.Parse()
 
-	if configPath == "" {
+	if *configPath == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	cfg, err := loadConfig(configPath)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config %s: %v", configPath, err)
+		log.Fatalf("Failed to load config %s: %v", *configPath, err)
 	}
 
 	zulipClient, err := internal.NewZulipClient(&cfg.Zulip)
@@ -146,50 +147,66 @@ func main() {
 	}
 	log.Printf("Connected to Kubernetes API %s", version)
 
-	if namespace == "" {
-		namespace = currentNamespace
+	if *namespace == "" {
+		*namespace = currentNamespace
 	}
 
-	log.Printf("Using namespace: %s", namespace)
+	log.Printf("Using namespace: %s", *namespace)
 
 	health := &internal.HealthChecker{}
+
+	// https://prometheus.io/docs/guides/go-application/
+	reg := prometheus.NewRegistry()
+	const promNamespace = "k8slogalerter"
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{
+			Namespace: promNamespace,
+		}),
+	)
+	metrics := internal.NewLogwatchMetrics(reg, promNamespace)
 
 	// We've validated that we can connect to the K8s API so now we'll report on whether
 	// any of the rule watchers have failed
 	go func() {
 		srv := &http.Server{
-			Addr:         listenAddr,
+			Addr:         *listenAddr,
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 10 * time.Second,
 		}
 		http.HandleFunc("/healthz", health.ServeHTTP)
-		log.Printf("Starting healthcheck server on %s", listenAddr)
+		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		log.Printf("Starting healthcheck/metrics server on %s", *listenAddr)
 		if err := srv.ListenAndServe(); err != nil {
-			log.Fatalf("Healthcheck server failed: %v", err)
+			log.Fatalf("Healthcheck/metrics server failed: %v", err)
 		}
 	}()
 
-	// Start watchers
-	var wg sync.WaitGroup
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
-	// Handle graceful shutdown
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-	go func() {
-		<-sigCh
-		log.Println("Received shutdown signal, stopping watchers...")
-		cancel()
-	}()
+	// Start watchers, handle graceful shutdown
+	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	g, gCtx := errgroup.WithContext(ctx)
 
 	for _, rule := range cfg.Rules {
-		wg.Add(1)
-		go func(r internal.Rule) {
-			defer wg.Done()
-			internal.RunWatcher(ctx, clientset, &r, zulipClient, namespace, health)
-		}(rule)
+		r := rule
+		g.Go(func() error {
+			if err := internal.RunWatcher(
+				gCtx,
+				clientset,
+				r,
+				zulipClient,
+				*namespace,
+				health,
+				metrics,
+			); err != nil {
+				return fmt.Errorf("watcher for rule '%s' failed: %w", r.Name, err)
+			}
+			return nil
+		})
 	}
 
-	wg.Wait()
+	if err := g.Wait(); err != nil {
+		cancel()
+		log.Fatalf("Application failed: %v", err)
+	}
+	cancel()
 }

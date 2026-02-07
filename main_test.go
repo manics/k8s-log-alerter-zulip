@@ -10,12 +10,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -253,13 +253,10 @@ func TestRunWatcher(t *testing.T) {
 
 	// Setup rule
 	rule := &internal.Rule{
-		Name:      "Test Rule",
 		PodLabels: map[string]string{"app": "test"},
 		Regex:     "\\[test\\]",
 	}
-	var err error
-	rule.Compiled, err = regexp.Compile(rule.Regex)
-	if err != nil {
+	if err := rule.Init("Test Rule"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,7 +281,20 @@ func TestRunWatcher(t *testing.T) {
 	ctx := t.Context()
 
 	// Run watcher in a goroutine
-	go internal.RunWatcher(ctx, client, rule, zulipClient, "", &internal.HealthChecker{})
+	go func() {
+		metrics := internal.NewLogwatchMetrics(prometheus.NewRegistry(), "test")
+		if err := internal.RunWatcher(
+			ctx,
+			client,
+			rule,
+			zulipClient,
+			"",
+			&internal.HealthChecker{},
+			metrics,
+		); err != nil {
+			t.Errorf("RunWatcher failed: %v", err)
+		}
+	}()
 
 	// Allow watcher to start
 	time.Sleep(100 * time.Millisecond)
