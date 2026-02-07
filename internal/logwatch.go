@@ -72,7 +72,13 @@ func (r *Rule) Init(name string) error {
 
 // Alerter sends alerts
 type Alerter interface {
-	SendAlert(topic string, pod *corev1.Pod, container *corev1.Container, message string) error
+	SendAlert(
+		ctx context.Context,
+		topic string,
+		pod *corev1.Pod,
+		container *corev1.Container,
+		message string,
+	) error
 }
 
 // LogwatchMetrics holds the Prometheus metrics for the log watcher
@@ -147,7 +153,11 @@ func RunWatcher(
 		if err != nil {
 			health.Report(rule.Name, err)
 			log.Printf("Error watching pods for rule %s: %v", rule.Name, err)
-			time.Sleep(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(5 * time.Second):
+			}
 			continue
 		}
 		health.Report(rule.Name, nil)
@@ -275,10 +285,13 @@ func streamLogs(
 		}
 
 		scanner := bufio.NewScanner(stream)
+		// Increase buffer to 1MB to handle large log lines
+		buf := make([]byte, 0, 64*1024)
+		scanner.Buffer(buf, 1024*1024)
 		for scanner.Scan() {
 			line := scanner.Text()
 			metrics.LogsTotal.Inc()
-			err := evaluateRule(rule, rateLimiter, alerter, line, pod, container, metrics)
+			err := evaluateRule(ctx, rule, rateLimiter, alerter, line, pod, container, metrics)
 			if err != nil {
 				log.Printf(
 					"Error evaluating rule '%s' for pod %s[%s]: %v",
@@ -323,6 +336,7 @@ func streamLogs(
 
 // evaluateRule checks whether a line matches the rule and sends an alert if required
 func evaluateRule(
+	ctx context.Context,
 	rule *Rule,
 	rateLimiter *TTLCache[*rate.Limiter],
 	alerter Alerter,
@@ -345,11 +359,11 @@ func evaluateRule(
 		metrics.LogsAlertsTotal.Inc()
 
 		if key == "" {
-			err = alerter.SendAlert(rule.Name, pod, container, line)
+			err = alerter.SendAlert(ctx, rule.Name, pod, container, line)
 			metrics.LogsAlertsSent.Inc()
 		} else {
 			if rateLimiter.Get(key).Allow() {
-				err = alerter.SendAlert(rule.Name, pod, container, line)
+				err = alerter.SendAlert(ctx, rule.Name, pod, container, line)
 				metrics.LogsAlertsSent.Inc()
 			} else {
 				log.Printf(

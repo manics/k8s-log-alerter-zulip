@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -147,10 +148,22 @@ func TestZulipClient(t *testing.T) {
 			},
 		},
 	}
-	if err := c.SendAlert("topic", pod, &pod.Spec.Containers[0], "message"); err != nil {
+	if err := c.SendAlert(
+		context.Background(),
+		"topic",
+		pod,
+		&pod.Spec.Containers[0],
+		"message",
+	); err != nil {
 		t.Errorf("Failed to send alert: %v", err)
 	}
-	if err := c.SendAlert("topic", pod, &pod.Spec.Containers[0], "{\"a\":1}"); err != nil {
+	if err := c.SendAlert(
+		context.Background(),
+		"topic",
+		pod,
+		&pod.Spec.Containers[0],
+		"{\"a\":1}",
+	); err != nil {
 		t.Errorf("Failed to send alert: %v", err)
 	}
 
