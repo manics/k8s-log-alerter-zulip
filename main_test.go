@@ -15,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
@@ -281,6 +282,7 @@ func TestRunWatcher(t *testing.T) {
 
 	// Run watcher in a goroutine
 	go func() {
+		metrics := internal.NewLogwatchMetrics(prometheus.NewRegistry(), "test")
 		if err := internal.RunWatcher(
 			ctx,
 			client,
@@ -288,6 +290,7 @@ func TestRunWatcher(t *testing.T) {
 			zulipClient,
 			"",
 			&internal.HealthChecker{},
+			metrics,
 		); err != nil {
 			t.Errorf("RunWatcher failed: %v", err)
 		}

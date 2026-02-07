@@ -14,6 +14,9 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"golang.org/x/sync/errgroup"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -103,25 +106,28 @@ func main() {
 	log.SetFlags(0)
 	log.SetOutput(new(logWriter))
 
-	var configPath string
-	flag.StringVar(&configPath, "c", "", "Path to configuration file")
+	configPath := flag.String("c", "", "Path to configuration file")
 
-	var namespace string
-	flag.StringVar(&namespace, "n", "", "Namespace")
+	namespace := flag.String("n", "", "Namespace")
 
-	var listenAddr string
-	flag.StringVar(&listenAddr, "healthcheck", ":8081", "Address to listen on for health checks")
+	listenAddr := flag.String(
+		"metrics",
+		":8081",
+		"Address to listen on for health checks and metrics",
+	)
+
+	flag.StringVar(listenAddr, "healthcheck", ":8081", "Alias for -metrics")
 
 	flag.Parse()
 
-	if configPath == "" {
+	if *configPath == "" {
 		flag.Usage()
 		os.Exit(1)
 	}
 
-	cfg, err := loadConfig(configPath)
+	cfg, err := loadConfig(*configPath)
 	if err != nil {
-		log.Fatalf("Failed to load config %s: %v", configPath, err)
+		log.Fatalf("Failed to load config %s: %v", *configPath, err)
 	}
 
 	zulipClient, err := internal.NewZulipClient(&cfg.Zulip)
@@ -141,26 +147,38 @@ func main() {
 	}
 	log.Printf("Connected to Kubernetes API %s", version)
 
-	if namespace == "" {
-		namespace = currentNamespace
+	if *namespace == "" {
+		*namespace = currentNamespace
 	}
 
-	log.Printf("Using namespace: %s", namespace)
+	log.Printf("Using namespace: %s", *namespace)
 
 	health := &internal.HealthChecker{}
+
+	// https://prometheus.io/docs/guides/go-application/
+	reg := prometheus.NewRegistry()
+	const promNamespace = "k8slogalerter"
+	reg.MustRegister(
+		collectors.NewGoCollector(),
+		collectors.NewProcessCollector(collectors.ProcessCollectorOpts{
+			Namespace: promNamespace,
+		}),
+	)
+	metrics := internal.NewLogwatchMetrics(reg, promNamespace)
 
 	// We've validated that we can connect to the K8s API so now we'll report on whether
 	// any of the rule watchers have failed
 	go func() {
 		srv := &http.Server{
-			Addr:         listenAddr,
+			Addr:         *listenAddr,
 			ReadTimeout:  5 * time.Second,
 			WriteTimeout: 10 * time.Second,
 		}
 		http.HandleFunc("/healthz", health.ServeHTTP)
-		log.Printf("Starting healthcheck server on %s", listenAddr)
+		http.Handle("/metrics", promhttp.HandlerFor(reg, promhttp.HandlerOpts{}))
+		log.Printf("Starting healthcheck/metrics server on %s", *listenAddr)
 		if err := srv.ListenAndServe(); err != nil {
-			log.Fatalf("Healthcheck server failed: %v", err)
+			log.Fatalf("Healthcheck/metrics server failed: %v", err)
 		}
 	}()
 
@@ -176,8 +194,9 @@ func main() {
 				clientset,
 				r,
 				zulipClient,
-				namespace,
+				*namespace,
 				health,
+				metrics,
 			); err != nil {
 				return fmt.Errorf("watcher for rule '%s' failed: %w", r.Name, err)
 			}

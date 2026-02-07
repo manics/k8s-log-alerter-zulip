@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promauto"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -73,6 +75,41 @@ type Alerter interface {
 	SendAlert(topic string, pod *corev1.Pod, container *corev1.Container, message string) error
 }
 
+// LogwatchMetrics holds the Prometheus metrics for the log watcher
+type LogwatchMetrics struct {
+	ContainersMonitored prometheus.Gauge
+	LogsTotal           prometheus.Counter
+	LogsAlertsTotal     prometheus.Counter
+	LogsAlertsSent      prometheus.Counter
+}
+
+// NewLogwatchMetrics creates a LogwatchMetrics
+func NewLogwatchMetrics(reg prometheus.Registerer, namespace string) *LogwatchMetrics {
+	m := &LogwatchMetrics{
+		ContainersMonitored: promauto.With(reg).NewGauge(prometheus.GaugeOpts{
+			Namespace: namespace,
+			Name:      "containers_monitored_count",
+			Help:      "Number of containers being monitored",
+		}),
+		LogsTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "logs_total",
+			Help:      "Number of logs processed",
+		}),
+		LogsAlertsTotal: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "logs_alerts_total",
+			Help:      "Number of logs that triggered an alert",
+		}),
+		LogsAlertsSent: promauto.With(reg).NewCounter(prometheus.CounterOpts{
+			Namespace: namespace,
+			Name:      "logs_alerts_sent",
+			Help:      "Number of alerts sent after ratelimiting",
+		}),
+	}
+	return m
+}
+
 // RunWatcher creates a watcher for a log rule
 func RunWatcher(
 	ctx context.Context,
@@ -81,6 +118,7 @@ func RunWatcher(
 	alerter Alerter,
 	namespace string,
 	health *HealthChecker,
+	metrics *LogwatchMetrics,
 ) error {
 	labelSelector := labels.Set(rule.PodLabels).String()
 	log.Printf("Starting watcher for rule '%s' labels: %s", rule.Name, labelSelector)
@@ -131,6 +169,7 @@ func RunWatcher(
 							log.Printf("Watching logs for pod %s[%s]", pod.Name, container.Name)
 							streamCtx, cancel := context.WithCancel(ctx)
 							activeStreams[key] = cancel
+							metrics.ContainersMonitored.Inc()
 							go streamLogs(
 								streamCtx,
 								client,
@@ -139,10 +178,12 @@ func RunWatcher(
 								rule,
 								alerter,
 								rateLimiter,
+								metrics,
 								func() {
 									mu.Lock()
 									defer mu.Unlock()
 									delete(activeStreams, key)
+									metrics.ContainersMonitored.Dec()
 								},
 							)
 						}
@@ -196,6 +237,7 @@ func streamLogs(
 	rule *Rule,
 	alerter Alerter,
 	rateLimiter *TTLCache[*rate.Limiter],
+	metrics *LogwatchMetrics,
 	cleanup func(),
 ) {
 	defer cleanup()
@@ -235,7 +277,8 @@ func streamLogs(
 		scanner := bufio.NewScanner(stream)
 		for scanner.Scan() {
 			line := scanner.Text()
-			err := evaluateRule(rule, rateLimiter, alerter, line, pod, container)
+			metrics.LogsTotal.Inc()
+			err := evaluateRule(rule, rateLimiter, alerter, line, pod, container, metrics)
 			if err != nil {
 				log.Printf(
 					"Error evaluating rule '%s' for pod %s[%s]: %v",
@@ -286,6 +329,7 @@ func evaluateRule(
 	line string,
 	pod *corev1.Pod,
 	container *corev1.Container,
+	metrics *LogwatchMetrics,
 ) error {
 	var err error
 	if rule.Compiled.MatchString(line) {
@@ -297,11 +341,16 @@ func evaluateRule(
 				key = matches[1]
 			}
 		}
+
+		metrics.LogsAlertsTotal.Inc()
+
 		if key == "" {
 			err = alerter.SendAlert(rule.Name, pod, container, line)
+			metrics.LogsAlertsSent.Inc()
 		} else {
 			if rateLimiter.Get(key).Allow() {
 				err = alerter.SendAlert(rule.Name, pod, container, line)
+				metrics.LogsAlertsSent.Inc()
 			} else {
 				log.Printf(
 					"Rate limit for rule:'%s' group:'%s', not sending alert for line: %s",

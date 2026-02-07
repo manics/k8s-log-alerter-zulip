@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -163,7 +164,16 @@ func TestRunWatcher(t *testing.T) {
 
 	// Run watcher in a goroutine
 	go func() {
-		if err := RunWatcher(ctx, client, rule, &MockAlerter{}, "", &HealthChecker{}); err != nil {
+		metrics := NewLogwatchMetrics(prometheus.NewRegistry(), "test")
+		if err := RunWatcher(
+			ctx,
+			client,
+			rule,
+			&MockAlerter{},
+			"",
+			&HealthChecker{},
+			metrics,
+		); err != nil {
 			t.Errorf("RunWatcher failed: %v", err)
 		}
 	}()
@@ -290,6 +300,7 @@ func TestEvaluateRule(t *testing.T) {
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
 
+	metrics := NewLogwatchMetrics(prometheus.NewRegistry(), "test")
 	testStrings := []string{
 		"[no match]",
 		// Group g1
@@ -310,6 +321,7 @@ func TestEvaluateRule(t *testing.T) {
 				fmt.Sprintf("%s %d", mark, i),
 				pod,
 				&pod.Spec.Containers[0],
+				metrics,
 			)
 			if err != nil {
 				t.Errorf("%v", err)
@@ -328,6 +340,7 @@ func TestEvaluateRule(t *testing.T) {
 			fmt.Sprintf("%s 😀", mark),
 			pod,
 			&pod.Spec.Containers[0],
+			metrics,
 		)
 		if err != nil {
 			t.Errorf("%v", err)
