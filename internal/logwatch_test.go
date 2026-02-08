@@ -2,6 +2,7 @@ package internal
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -108,6 +109,7 @@ type MockAlerter struct {
 }
 
 func (m *MockAlerter) SendAlert(
+	ctx context.Context,
 	topic string,
 	pod *corev1.Pod,
 	container *corev1.Container,
@@ -315,6 +317,7 @@ func TestEvaluateRule(t *testing.T) {
 		time.Sleep(500 * time.Millisecond)
 		for _, mark := range testStrings {
 			err := evaluateRule(
+				t.Context(),
 				rule,
 				rateLimiter,
 				alerter,
@@ -334,6 +337,7 @@ func TestEvaluateRule(t *testing.T) {
 	time.Sleep(2 * time.Second)
 	for _, mark := range testStrings {
 		err := evaluateRule(
+			t.Context(),
 			rule,
 			rateLimiter,
 			alerter,

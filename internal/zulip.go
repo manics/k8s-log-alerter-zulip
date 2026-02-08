@@ -1,6 +1,7 @@
 package internal
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -137,6 +138,7 @@ func (c *ZulipClient) checkAuth() error {
 
 // SendAlert sends a message to a Zulip channel with topic set to the rule name
 func (c *ZulipClient) SendAlert(
+	ctx context.Context,
 	topic string,
 	pod *corev1.Pod,
 	container *corev1.Container,
@@ -153,7 +155,7 @@ func (c *ZulipClient) SendAlert(
 
 	apiURL := strings.TrimRight(c.Config.Site, "/") + "/api/v1/messages"
 
-	req, err := http.NewRequest("POST", apiURL, strings.NewReader(data.Encode()))
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, strings.NewReader(data.Encode()))
 	if err != nil {
 		return fmt.Errorf("error creating request: %w", err)
 	}

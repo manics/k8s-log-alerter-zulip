@@ -30,11 +30,16 @@ func (h *HealthChecker) Report(rule string, err error) {
 
 func (h *HealthChecker) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	if len(h.errors) > 0 {
+	var failedRules []string
+	for ruleName := range h.errors {
+		failedRules = append(failedRules, ruleName)
+	}
+	h.mu.Unlock()
+
+	if len(failedRules) > 0 {
 		w.WriteHeader(http.StatusInternalServerError)
-		for r, e := range h.errors {
-			if _, err := fmt.Fprintf(w, "Error in rule '%s': %v\n", r, e); err != nil {
+		for _, ruleName := range failedRules {
+			if _, err := fmt.Fprintf(w, "Error in rule '%s'\n", ruleName); err != nil {
 				log.Printf("Failed to write response: %v", err)
 			}
 		}
