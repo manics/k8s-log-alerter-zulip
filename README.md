@@ -16,9 +16,13 @@ The `rules` section is a dictionary where the keys are the rule names which are 
 - `pod_labels` is a dicionary of labels to be matched, matching containers will be watched
 - `regex` is a regular expression that matches logs that should be sent to Zulip
 
-Optionally enable rate limiting (limits apply per rule):
+### JSON logs
 
-- `group_regex`: Regular expression that contains one (subgroup) which will be used to group logs for rate limiting purposes
+If logs are in JSON format they will be autoformatted when sent to Zulip.
+JSON logs support optional rate limiting.
+Limits apply per rule:
+
+- `json_grouping_fields`: List of JSON keys whose values are joined to form a string that is used to group logs for rate-limiting
 - `limit_first_n`: Rate limiter bucket size, show this number of logs initially
 - `limit_interval_seconds`: Rate limits alerts to this interval between alerts
 - `limit_reset_seconds`: Reset the limiter if there are no alerts for this time period

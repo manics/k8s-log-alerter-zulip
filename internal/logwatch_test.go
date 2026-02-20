@@ -278,10 +278,9 @@ func TestEvaluateRule(t *testing.T) {
 	}
 
 	rule := &Rule{
-		PodLabels: map[string]string{"app": "test"},
-		Regex:     "\\[test\\]",
-		// The first (group) is used as the key
-		GroupRegex: "^(g[\\d])-\\w",
+		PodLabels:          map[string]string{"app": "test"},
+		Regex:              "\\[test\\]",
+		JsonGroupingFields: []string{"group"},
 	}
 	if err := rule.Init("Test Rule"); err != nil {
 		t.Fatal(err)
@@ -303,25 +302,36 @@ func TestEvaluateRule(t *testing.T) {
 	}
 
 	metrics := NewLogwatchMetrics(prometheus.NewRegistry(), "test")
-	testStrings := []string{
-		"[no match]",
+
+	type testData struct {
+		group string
+		msg   string
+	}
+
+	testItems := []testData{
+		{"g1", "[no match]"},
+		// Empty group
+		{"", "a [test]"},
+		{"", "b [test]"},
+		{"", "c [test]"},
 		// Group g1
-		"g1-a [test]",
-		"g1-b [test]",
-		"g1-c [test]",
+		{"g1", "g1-a [test]"},
+		{"g1", "g1-b [test]"},
+		{"g1", "g1-c [test]"},
 		// Group g2
-		"g2-a [test]",
+		{"g2", "g2-a [test]"},
 	}
 
 	for i := range 3 {
 		time.Sleep(500 * time.Millisecond)
-		for _, mark := range testStrings {
+		for _, item := range testItems {
+			line := fmt.Sprintf(`{"group": "%s", "msg": "%s %d"}`, item.group, item.msg, i)
 			err := evaluateRule(
 				t.Context(),
 				rule,
 				rateLimiter,
 				alerter,
-				fmt.Sprintf("%s %d", mark, i),
+				line,
 				pod,
 				&pod.Spec.Containers[0],
 				metrics,
@@ -335,13 +345,14 @@ func TestEvaluateRule(t *testing.T) {
 
 	// This should be enough to reset the limiter, so burst=2 should take effect again
 	time.Sleep(2 * time.Second)
-	for _, mark := range testStrings {
+	for _, item := range testItems {
+		line := fmt.Sprintf(`{"group": "%s", "msg": "%s 😀"}`, item.group, item.msg)
 		err := evaluateRule(
 			t.Context(),
 			rule,
 			rateLimiter,
 			alerter,
-			fmt.Sprintf("%s 😀", mark),
+			line,
 			pod,
 			&pod.Spec.Containers[0],
 			metrics,
@@ -351,7 +362,9 @@ func TestEvaluateRule(t *testing.T) {
 		}
 	}
 
-	// Regex 'g[1-3]' defines the group identifiers used for rate limiting
+	// The 'group' field provides the group identifiers used for rate limiting
+	//
+	// A match with empty group is never rate limited
 	//
 	// The rate limit is 1/s, but with Burst=2 so "g1-a [test]" and "g1-b [test]"
 	// should appear the first time
@@ -365,27 +378,43 @@ func TestEvaluateRule(t *testing.T) {
 	expected_messages := []string{
 		// "[no match]", never matches
 
-		"g1-a [test] 0",
-		"g1-b [test] 0",
+		`{"group": "", "msg": "a [test] 0"}`,
+		`{"group": "", "msg": "b [test] 0"}`,
+		`{"group": "", "msg": "c [test] 0"}`,
+
+		`{"group": "g1", "msg": "g1-a [test] 0"}`,
+		`{"group": "g1", "msg": "g1-b [test] 0"}`,
 		// "g1-c [test] 0", rate limited
-		"g2-a [test] 0",
+		`{"group": "g2", "msg": "g2-a [test] 0"}`,
+
+		`{"group": "", "msg": "a [test] 1"}`,
+		`{"group": "", "msg": "b [test] 1"}`,
+		`{"group": "", "msg": "c [test] 1"}`,
 
 		// "g1-a [test] 1", rate limited
 		// "g1-b [test] 1", rate limited
 		// "g1-c [test] 1", rate limited
-		"g2-a [test] 1",
+		`{"group": "g2", "msg": "g2-a [test] 1"}`,
 
-		"g1-a [test] 2",
+		`{"group": "", "msg": "a [test] 2"}`,
+		`{"group": "", "msg": "b [test] 2"}`,
+		`{"group": "", "msg": "c [test] 2"}`,
+
+		`{"group": "g1", "msg": "g1-a [test] 2"}`,
 		// "g1-b [test] 2", rate limited
 		// "g1-c [test] 2", rate limited
-		"g2-a [test] 2",
+		`{"group": "g2", "msg": "g2-a [test] 2"}`,
 
 		// 2s delay means the limits are reset
 
-		"g1-a [test] 😀",
-		"g1-b [test] 😀",
+		`{"group": "", "msg": "a [test] 😀"}`,
+		`{"group": "", "msg": "b [test] 😀"}`,
+		`{"group": "", "msg": "c [test] 😀"}`,
+
+		`{"group": "g1", "msg": "g1-a [test] 😀"}`,
+		`{"group": "g1", "msg": "g1-b [test] 😀"}`,
 		// "g1-c [test] 😀", rate limited
-		"g2-a [test] 😀",
+		`{"group": "g2", "msg": "g2-a [test] 😀"}`,
 	}
 	if len(expected_messages) != len(alerter.messages) {
 		t.Fatalf(
@@ -399,5 +428,75 @@ func TestEvaluateRule(t *testing.T) {
 		if message != expected_messages[idx] {
 			t.Errorf("[%d] Expected alert '%s', got '%s'", idx, expected_messages[idx], message)
 		}
+	}
+}
+
+func TestGetGroupingKey(t *testing.T) {
+	tests := []struct {
+		name     string
+		fields   []string
+		line     string
+		expected string
+	}{
+		{
+			name:     "Single field exists",
+			fields:   []string{"a"},
+			line:     `{"a": "val"}`,
+			expected: "val",
+		},
+		{
+			name:     "Multiple fields exist",
+			fields:   []string{"a", "b"},
+			line:     `{"a": "val1", "b": "val2"}`,
+			expected: "val1\x1fval2",
+		},
+		{
+			name:     "Some fields missing",
+			fields:   []string{"a", "c"},
+			line:     `{"a": "val1", "b": "val2"}`,
+			expected: "val1\x1f",
+		},
+		{
+			name:     "Nested fields",
+			fields:   []string{"a.b"},
+			line:     `{"a": {"b": "val"}}`,
+			expected: "val",
+		},
+		{
+			name:     "All fields missing",
+			fields:   []string{"c"},
+			line:     `{"a": "val"}`,
+			expected: "",
+		},
+		{
+			name:     "Invalid JSON",
+			fields:   []string{"a"},
+			line:     `not json`,
+			expected: "",
+		},
+		{
+			name:     "Empty values",
+			fields:   []string{"a", "b"},
+			line:     `{"a": "", "b": ""}`,
+			expected: "",
+		},
+		{
+			name:     "Mixed empty and non-empty",
+			fields:   []string{"a", "b"},
+			line:     `{"a": "val", "b": ""}`,
+			expected: "val\x1f",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rule := &Rule{
+				JsonGroupingFields: tt.fields,
+			}
+			got := getGroupingKey(rule, tt.line)
+			if got != tt.expected {
+				t.Errorf("getGroupingKey() = %q, expected %q", got, tt.expected)
+			}
+		})
 	}
 }

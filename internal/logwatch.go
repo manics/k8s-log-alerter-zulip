@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"regexp"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+	"github.com/tidwall/gjson"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -20,7 +22,7 @@ import (
 
 // Rule describes a rule for matching logs and sending alerts
 // If rate-limiting is enabled:
-// - GroupRegex is a regex containing a (subgroup) that is used to group logs for rate-limiting
+// - JsonGroupingFields is a list of JSON keys whose values are joined to form a string that is used to group logs for rate-limiting
 // - LimitFirstN will always alert on the first N logs
 // - LimitIntervalSeconds is the minimum number of seconds between each subsequent alert
 // - LimitResetSeconds is approximately when the rate limiter will be reset
@@ -29,8 +31,7 @@ type Rule struct {
 	PodLabels            map[string]string `json:"pod_labels"`
 	Regex                string            `json:"regex"`
 	Compiled             *regexp.Regexp    `json:"-"`
-	GroupRegex           string            `json:"group_regex"`
-	CompiledGroup        *regexp.Regexp    `json:"-"`
+	JsonGroupingFields   []string          `json:"json_grouping_fields"`
 	LimitFirstN          int               `json:"limit_first_n"`
 	LimitIntervalSeconds int               `json:"limit_interval_seconds"`
 	LimitResetSeconds    int               `json:"limit_reset_seconds"`
@@ -44,15 +45,10 @@ func (r *Rule) Init(name string) error {
 
 	re := regexp.MustCompile(r.Regex)
 
-	var gre *regexp.Regexp
-	if len(r.GroupRegex) > 0 {
-		gre = regexp.MustCompile(r.GroupRegex)
-	}
-
 	if r.LimitFirstN > 0 || r.LimitIntervalSeconds > 0 {
-		if gre == nil {
+		if len(r.JsonGroupingFields) == 0 {
 			return fmt.Errorf(
-				"group_regex is required in rule %s since rate limits are enabled",
+				"json_grouping_fields is required in rule %s since rate limits are enabled",
 				name,
 			)
 		}
@@ -66,7 +62,6 @@ func (r *Rule) Init(name string) error {
 
 	r.Name = name
 	r.Compiled = re
-	r.CompiledGroup = gre
 	return nil
 }
 
@@ -219,7 +214,7 @@ func RunWatcher(
 
 // getRateLimiter creates the rate limiter for this rule if enabled
 func getRateLimiter(ctx context.Context, rule *Rule) (*TTLCache[*rate.Limiter], error) {
-	if rule.CompiledGroup != nil {
+	if len(rule.JsonGroupingFields) > 0 {
 		ttl := time.Duration(rule.LimitResetSeconds) * time.Second
 		pruneInterval := ttl / 10
 		rateLimiter, err := NewTTLCache(
@@ -349,11 +344,7 @@ func evaluateRule(
 	if rule.Compiled.MatchString(line) {
 		key := ""
 		if rateLimiter != nil {
-			// Look for the first regex (group) match
-			matches := rule.CompiledGroup.FindStringSubmatch(line)
-			if len(matches) > 1 {
-				key = matches[1]
-			}
+			key = getGroupingKey(rule, line)
 		}
 
 		metrics.LogsAlertsTotal.Inc()
@@ -375,4 +366,37 @@ func evaluateRule(
 		}
 	}
 	return err
+}
+
+// getGroupingKey looks up JSON fields, and concatenates them using ASCII 0x1F
+// (Unit Separator).
+// Missing fields are set to ""
+// If line is not valid JSON returns ""
+// If all fields are empty or missing returns ""
+func getGroupingKey(rule *Rule, line string) string {
+	const delimiter = "\x1f"
+
+	if !gjson.Valid(line) {
+		// TODO: log warning
+		return ""
+	}
+	var values []string
+	for _, jsonKey := range rule.JsonGroupingFields {
+		result := gjson.Get(line, jsonKey)
+		values = append(values, result.String())
+	}
+
+	allEmpty := true
+	for _, v := range values {
+		if v != "" {
+			allEmpty = false
+			break
+		}
+	}
+
+	if allEmpty {
+		return ""
+	}
+
+	return strings.Join(values, delimiter)
 }
