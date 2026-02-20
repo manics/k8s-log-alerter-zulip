@@ -11,8 +11,11 @@
         "app.kubernetes.io/name": "cryptnono"
       },
       "regex": "\"action\":\\s*\"killed\"",
-      "_comment": "Group by pod name, limit to 1/minute but allow initial burst of 4, reset after 10 minutes",
-      "group_regex": "\"io.kubernetes.pod.name\":\\s*\"([^\"]+)\"",
+      "_comment": "Group by (pod name + matched string), limit to 1/minute but allow initial burst of 4, reset after 10 minutes",
+      "json_grouping_fields": [
+        "labels.io\\.kubernetes\\.pod\\.name",
+        "matched"
+      ],
       "limit_first_n": 4,
       "limit_interval_seconds": 60,
       "limit_reset_seconds": 600
