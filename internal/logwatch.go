@@ -172,6 +172,7 @@ func RunWatcher(
 						key := string(pod.UID) + " " + container.Name
 						if _, exists := activeStreams[key]; !exists {
 							log.Printf("Watching logs for pod %s[%s]", pod.Name, container.Name)
+							/* #nosec G118 */
 							streamCtx, cancel := context.WithCancel(ctx)
 							activeStreams[key] = cancel
 							metrics.ContainersMonitored.Inc()

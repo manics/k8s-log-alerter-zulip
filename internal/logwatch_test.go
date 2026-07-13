@@ -141,7 +141,8 @@ func TestRunWatcher(t *testing.T) {
 	}
 
 	baseClient.Resources = append(baseClient.Resources, &metav1.APIResourceList{
-		GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "pods", Namespaced: true, Kind: "Pod"}},
+		GroupVersion: "v1",
+		APIResources: []metav1.APIResource{{Name: "pods", Namespaced: true, Kind: "Pod"}},
 	})
 
 	coreClient := &MockCoreV1{
